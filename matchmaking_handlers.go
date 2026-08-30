@@ -100,6 +100,12 @@ type gathering struct {
 // proven server's session lifecycle (create/join, participant tracking) and the
 // server→client Participate notification the console's Pia waits on.
 type Matchmaking struct {
+	// ParticipationNotificationDelay lets 3D World finish creating its local session
+	// before Participate arrives. Zero keeps the usual synchronous notifications.
+	ParticipationNotificationDelay time.Duration
+	// LocalLoopbackStations keeps the registered public identity in same-PC tests.
+	// Enable only when the game server also skips loopback NAT probes.
+	LocalLoopbackStations bool
 	// FindByParticipantEnabled fait répondre RÉELLEMENT à FindMatchmakeSessionByParticipant
 	// (0x6D.0x33) au lieu d'une liste vide. Animal Crossing s'en sert pour la visite d'île
 	// entre amis ; Smash n'appelle cette méthode qu'au démarrage et attend une liste vide,
@@ -634,7 +640,7 @@ func (m *Matchmaking) createSession(conn *Connection, req *RMCMessage) *RMCMessa
 	}
 	// Self-notify the host (same as autoMatchmake) so a friend-room/tournament lobby
 	// held solo also leaves Pia's WaitNotification wall instead of 2618-562.
-	m.notifyParticipation(conn, parts, gid, "")
+	m.notifyParticipationWithDelay(conn, parts, gid)
 	return NewRMCSuccess(s, ProtocolMatchmakeExtension, req.Method, req.CallID, out.Bytes())
 }
 
@@ -683,7 +689,7 @@ func (m *Matchmaking) joinSession(conn *Connection, req *RMCMessage) *RMCMessage
 	m.mu.Unlock()
 
 	if joined {
-		m.notifyParticipation(conn, parts, gid, "")
+		m.notifyParticipationWithDelay(conn, parts, gid)
 	}
 	return NewRMCSuccess(s, ProtocolMatchmakeExtension, req.Method, req.CallID, out.Bytes())
 }
@@ -877,7 +883,7 @@ func (m *Matchmaking) getSessionURLs(conn *Connection, req *RMCMessage) *RMCMess
 	// Hand over the host's REAL UDP endpoint, not the WebSocket TCP port it registered:
 	// the latter is unreachable for Pia's hole-punch, so the joiner's probe never lands
 	// and the console stalls at MatchMakingExt m=1.
-	urls, status := natBridgeStations(host.Stations(), m.PublicStationFirst)
+	urls, status := m.bridgeSessionStations(host.Stations())
 	if status != bridgeNoRVCID {
 		// Either it worked, or nothing a moment brings will change it.
 		return sessionURLsResponse(conn, req, relayedFor(conn, host, urls))
@@ -914,7 +920,7 @@ func (m *Matchmaking) answerSessionURLsWhenHostIsReady(conn *Connection, req *RM
 	for time.Now().Before(deadline) {
 		time.Sleep(hostReplaceURLPoll)
 
-		if urls, status := natBridgeStations(host.Stations(), m.PublicStationFirst); status == bridgeOK {
+		if urls, status := m.bridgeSessionStations(host.Stations()); status == bridgeOK {
 			fmt.Printf("[MM] GetSessionURLs pid=%d: host reported its ReplaceURL -> bridged\n", conn.PID)
 			conn.SendRMC(sessionURLsResponse(conn, req, relayedFor(conn, host, urls)))
 
